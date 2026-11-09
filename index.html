@@ -28,6 +28,11 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&amp;display=swap" />
 <title>CRM לידים · Voipho</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="logo.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-title" content="Voipho" />
+<meta name="application-name" content="Voipho CRM" />
 <style>
 /* ===== Voipho CRM — 2026-10-01 "clean" + round 3: calm dark. Orange = primary action / בטיפול / פניתי; blue = links + חדש strip; category hues for avatars/domains. Rubik. ===== */
 :root {
@@ -19597,6 +19602,8 @@ a.gen-mail:hover { background: var(--surface-3, rgba(0,0,0,.06)); color: inherit
 
   const leads = JSON.parse(document.getElementById('leads-data').textContent);
   const leadById = Object.fromEntries(leads.map(L => [L.id, L]));
+  const SHARED_KEY = 'voipho-crm-shared-leads-v1'; // 2026-11-09: leads shared from the phone (synced)
+  (function () { try { const o = JSON.parse(localStorage.getItem(SHARED_KEY) || 'null') || {}; for (const id of Object.keys(o)) { const L = o[id]; if (L && L.id && !leadById[id]) { leads.push(L); leadById[id] = L; } } } catch (e) {} })();
   const feedEl = document.getElementById('feed');
   const emptyEl = document.getElementById('empty');
   const searchEl = document.getElementById('search');
@@ -19620,7 +19627,8 @@ a.gen-mail:hover { background: var(--surface-3, rgba(0,0,0,.06)); color: inherit
   const SYNC_MAP_KEYS = ['voipho-crm-statuses-v2', 'voipho-crm-prev-status-v1', 'voipho-crm-contacted-v1', 'voipho-crm-custom-contacts-v1', 'voipho-crm-template-edits-v1', 'voipho-crm-notes-v1',
     'voipho-crm-contact-method-v1', 'voipho-crm-firstname-v1', 'voipho-crm-nextstep-v1',
     'voipho-crm-chatnotes-v1', 'voipho-crm-moved-progress-v1', // round 7: chat notes { "lead|noteId": {id,text,ts} }, moved-to-בטיפול time { lead: ms }
-    'voipho-crm-manual-contacts-v1', 'voipho-crm-moved-v2', 'voipho-crm-sort-tabs-v1', 'voipho-crm-templates-v1']; // round 8
+    'voipho-crm-manual-contacts-v1', 'voipho-crm-moved-v2', 'voipho-crm-sort-tabs-v1', 'voipho-crm-templates-v1', // round 8
+    'voipho-crm-shared-leads-v1']; // 2026-11-09: leads added by iPhone share { id: lead }
   const SYNC_VALUE_KEYS = ['voipho-crm-sort-v1', 'voipho-crm-filters-v1', 'voipho-crm-sort-progress-v1', 'voipho-crm-sort-progress-v2', 'voipho-crm-template-last-v1'];
   const SYNC_KEYS = SYNC_MAP_KEYS.concat(SYNC_VALUE_KEYS);
   const SYNC_META_KEY = 'voipho-crm-sync-meta-v1';
@@ -22749,6 +22757,7 @@ a.gen-mail:hover { background: var(--surface-3, rgba(0,0,0,.06)); color: inherit
     syncSortSel();
     activeChips = loadChips();
     syncChipsUI();
+    sharedMerge();
     render({ noAnim: true });
   }
   function syncHandleServer(json) {
@@ -22820,6 +22829,350 @@ a.gen-mail:hover { background: var(--surface-3, rgba(0,0,0,.06)); color: inherit
     syncInfo: () => ({ enabled: syncEnabled, ns: syncNs, status: syncStatus, pending: !!syncCollect() }), syncNow: () => syncPull(),
     chatStamp, chatCount: id => chatNotes(id).length,
     fillTemplate, DEFAULT_TPL_TEXT, openTemplates: () => openTplSheet(), openMessage: (id, v) => openMsgSheet(id, v || null), manualCount: id => manualList(id).length, movedAtId: id => leadById[id] ? movedAt(leadById[id]) : 0, hideCtip, CTIP_DELAY };
+
+  /* ===================== 2026-11-09: 📲 iPhone share → manual lead (links + files) =====================
+   * Links:  ?add=<url>[&title=..]  (iOS Shortcut "Voipho CRM", same as Klober)  or ?url= / ?text=
+   * Files:  the Shortcut POSTs {name,type,data(base64)} to Firebase voipho-inbox/<ns> and opens ?inbox=1.
+   *         Every open of the CRM drains that inbox → manual lead + attachment in voipho-files/<ns>/<leadId>.
+   * Leads live in the synced map voipho-crm-shared-leads-v1 { id: lead }, so they appear on every device.
+   */
+  const SH_FB = 'https://klober-crm-sync-default-rtdb.firebaseio.com/';
+  const SH_NS = encKey(syncNs || 'main');
+  const SH_INBOX = SH_FB + 'voipho-inbox/' + SH_NS;
+  const SH_FILES = SH_FB + 'voipho-files/' + SH_NS;
+  const SH_MAX_B64 = 9800000;   // Firebase RTDB string limit is 10 MB → ~7 MB original file
+  const SH_IMG_MAX = 1600, SH_IMG_Q = 0.8;
+  const shNetOk = typeof fetch === 'function' && /^https?:$/.test(location.protocol) && !(navigator.webdriver && !syncNs);
+  function shToday() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function shSave(L) { const o = loadObj(SHARED_KEY); o[L.id] = L; saveObj(SHARED_KEY, o); sharedMerge(); }
+  function shRemove(id) { const o = loadObj(SHARED_KEY); delete o[id]; saveObj(SHARED_KEY, o); sharedMerge(); }
+  function sharedMerge() {
+    const o = loadObj(SHARED_KEY); let ch = false;
+    for (const id of Object.keys(o)) {
+      const L = o[id]; if (!L || !L.id) continue;
+      const cur = leadById[id];
+      if (cur && !cur.shared) continue; // never shadow a built-in lead
+      if (cur && JSON.stringify(cur) === JSON.stringify(L)) continue;
+      if (cur) { const i = leads.indexOf(cur); if (i >= 0) leads[i] = L; else leads.push(L); } else leads.push(L);
+      leadById[id] = L; ch = true;
+    }
+    for (let i = leads.length - 1; i >= 0; i--) { const L = leads[i]; if (L.shared && !o[L.id]) { leads.splice(i, 1); delete leadById[L.id]; ch = true; } }
+    return ch;
+  }
+  function shNormUrl(u) {
+    try {
+      const x = new URL(String(u).trim());
+      let host = x.hostname.toLowerCase().replace(/^(www|m|il|he)\./, '');
+      let path = x.pathname.replace(/\/+$/, '');
+      let q = '';
+      if (/youtube\.com$/.test(host) && x.searchParams.get('v')) q = '?v=' + x.searchParams.get('v');
+      return host + decodeURIComponent(path).toLowerCase() + q;
+    } catch (e) { return String(u || '').trim().toLowerCase(); }
+  }
+  function shHost(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } }
+  function shIsHome(u) { try { const x = new URL(u); return x.pathname.replace(/\/+$/, '') === '' ; } catch (e) { return false; } }
+  function shFindDup(url) {
+    const n = shNormUrl(url), host = shHost(url).replace(/^(m|il|he)\./, ''), home = shIsHome(url);
+    for (const L of leads) {
+      const urls = [L.website, L.sharedUrl, L.companyLinkedin, L.jobPost && L.jobPost.url, L.linkedinEvidence && L.linkedinEvidence.url, L.pbxEvidenceUrl].filter(Boolean);
+      for (const u of urls) {
+        if (shNormUrl(u) === n) return L;
+        if (home && u === L.website && host && shHost(u).replace(/^(m|il|he)\./, '') === host) return L;
+      }
+    }
+    return null;
+  }
+  function shShowLead(L, msg) {
+    infoToast(msg);
+    query = String(L.company || '').slice(0, 40); if (searchEl) searchEl.value = query;
+    const t = tabOf(L); expanded.add(L.id);
+    setFilter(t === 'הכל' ? 'חדש' : t);
+  }
+  function shBanner(text, ok) {
+    let b = document.getElementById('shBanner');
+    if (!b) { b = document.createElement('div'); b.id = 'shBanner'; document.body.appendChild(b); }
+    b.className = 'sh-banner' + (ok === false ? ' err' : ok ? ' ok' : '');
+    b.textContent = text; b.hidden = false;
+    clearTimeout(shBanner._t); if (ok !== undefined) shBanner._t = setTimeout(() => { b.hidden = true; }, 3500);
+  }
+  function shBaseLead(id, company, extra) {
+    return Object.assign({
+      id: id, shared: true, date: shToday(), addedAt: new Date().toISOString(),
+      company: company, website: '', category: 'לא מסווג', mainCategory: 'לא מסווג', people: [],
+      why: 'נוסף ידנית מהטלפון (שיתוף). להשלים מחקר: מה החברה עושה, מוקד שירות/מכירות, ולמי לפנות.',
+      helpLine: '', leadSource: 'manual', manualSource: 'שיתוף מהאייפון'
+    }, extra || {});
+  }
+  async function shFetchMeta(url) {
+    try {
+      const r = await fetch('https://api.microlink.io/?url=' + encodeURIComponent(url), { cache: 'no-store' });
+      if (!r.ok) return null; const j = await r.json(); return j && j.status === 'success' ? j.data : null;
+    } catch (e) { return null; }
+  }
+  function shCleanTitle(t) {
+    t = String(t || '').replace(/\s+/g, ' ').trim();
+    t = t.replace(/\s*[|·–—-]\s*(LinkedIn|Facebook|Instagram|YouTube|X|Twitter)\s*$/i, '');
+    t = t.replace(/^(Home|Homepage|דף הבית|ראשי)\s*[|·–—-]\s*/i, '').replace(/\s*[|·–—-]\s*(Home|Homepage|דף הבית|ראשי)\s*$/i, '');
+    return t.slice(0, 80);
+  }
+  function addSharedLink(rawInput, titleIn) {
+    const m = String(rawInput || '').match(/https?:\/\/[^\s"'<>]+/i);
+    if (!m) return null;
+    let url = m[0].replace(/[),.;!?]+$/, '');
+    try { const x = new URL(url); ['igsh', 'igshid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'si', 'rcm', 'trk'].forEach(k => x.searchParams.delete(k)); url = x.toString(); } catch (e) {}
+    const dup = shFindDup(url);
+    if (dup) { shShowLead(dup, 'כבר קיים ב-CRM: ' + dup.company); return dup; }
+    const host = shHost(url);
+    const isLiCo = /linkedin\.com\/company\//i.test(url);
+    let guess = shCleanTitle(titleIn) || (isLiCo ? decodeURIComponent((url.match(/company\/([^/?#]+)/i) || [])[1] || '').replace(/[-_]+/g, ' ') : '') || host.replace(/\.(co\.il|org\.il|com|co|net|org|io|ai|il)$/i, '') || 'ליד ידני';
+    const id = 'sh-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    const L = shBaseLead(id, guess, { website: url, sharedUrl: url, titleAuto: true, manualSource: 'שיתוף מהאייפון (' + host + ')' });
+    if (isLiCo) L.companyLinkedin = url;
+    shSave(L);
+    shShowLead(L, '✓ הליד נוסף ל-📸 ידני');
+    if (shNetOk) shFetchMeta(url).then(d => {
+      if (!d) return;
+      const cur = loadObj(SHARED_KEY)[id]; if (!cur || !cur.titleAuto) return;
+      const pub = String(d.publisher || '').trim(), ttl = String(d.title || '').trim();
+      const social = /linkedin|facebook|instagram|youtube|tiktok|twitter|(^|[^a-z0-9])x\.com/i.test(pub + ' ' + url);
+      const seg = ttl.split(/\s+[|·–—-]\s+|:\s+/)[0];
+      const nm = shCleanTitle(social ? ttl : (pub ? pub.replace(/^www\./i, '') : seg));
+      const upd = Object.assign({}, cur);
+      if (nm) upd.company = nm;
+      if (d.description) upd.why = String(d.description).slice(0, 400) + '\n\n(נוסף משיתוף מהטלפון. להשלים מחקר.)';
+      if (d.logo && d.logo.url) upd.logoUrl = d.logo.url;
+      shSave(upd); render({ noAnim: true });
+    });
+    return L;
+  }
+  /* —— files —— */
+  function shB64Bytes(b64, n) { try { const s = atob(b64.slice(0, Math.ceil(n / 3) * 4 + 4)); return Array.from(s.slice(0, n), c => c.charCodeAt(0)); } catch (e) { return []; } }
+  function shSniff(b64, name, hint) {
+    const by = shB64Bytes(b64, 16), s = String.fromCharCode.apply(null, by);
+    if (by[0] === 0xFF && by[1] === 0xD8) return 'image/jpeg';
+    if (s.startsWith('\x89PNG')) return 'image/png';
+    if (s.startsWith('GIF8')) return 'image/gif';
+    if (s.startsWith('RIFF') && s.slice(8, 12) === 'WEBP') return 'image/webp';
+    if (s.startsWith('%PDF')) return 'application/pdf';
+    if (s.slice(4, 8) === 'ftyp' && /heic|heix|mif1|msf1|hevc/.test(s.slice(8, 12))) return 'image/heic';
+    const ext = String(name || '').split('.').pop().toLowerCase();
+    const map = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', pdf: 'application/pdf', txt: 'text/plain', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', csv: 'text/csv' };
+    if (map[ext]) return map[ext];
+    if (/text|string/i.test(hint || '')) return 'text/plain';
+    try { const t = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(b64.slice(0, 4000)), c => c.charCodeAt(0))); if (!/[\x00-\x08\x0E-\x1F]/.test(t)) return 'text/plain'; } catch (e) {}
+    return 'application/octet-stream';
+  }
+  function shCompressImage(dataUrl) {
+    return new Promise(res => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const k = Math.min(1, SH_IMG_MAX / Math.max(img.naturalWidth, img.naturalHeight));
+          const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+          const c = document.createElement('canvas'); c.width = w; c.height = h;
+          const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h);
+          res({ data: c.toDataURL('image/jpeg', SH_IMG_Q), w: w, h: h });
+        } catch (e) { res(null); }
+      };
+      img.onerror = () => res(null);
+      img.src = dataUrl;
+    });
+  }
+  async function shSha(s) {
+    try { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return Array.from(new Uint8Array(b).slice(0, 12), x => x.toString(16).padStart(2, '0')).join(''); }
+    catch (e) { let h = 0; for (let i = 0; i < s.length; i += 7) h = (h * 31 + s.charCodeAt(i)) | 0; return 'h' + (h >>> 0).toString(16) + s.length; }
+  }
+  // b64: raw base64 (no data: prefix). Returns the lead (new or existing duplicate) or null.
+  async function shAddFile(b64, name, hint, fixedId) {
+    b64 = String(b64 || '').replace(/^data:[^,]*,/, '').replace(/[\s\r\n]+/g, '');
+    if (!b64) return null;
+    const type = shSniff(b64, name, hint);
+    const day = new Date().toLocaleString('he-IL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    if (type === 'text/plain' || type === 'text/csv') {
+      let txt = ''; try { txt = new TextDecoder().decode(Uint8Array.from(atob(b64), c => c.charCodeAt(0))); } catch (e) {}
+      if (/https?:\/\//i.test(txt)) return addSharedLink(txt, '');
+      if (txt.trim() && txt.length < 2000) {
+        const id = fixedId || ('sh-' + Date.now().toString(36));
+        if (leadById[id]) return leadById[id];
+        const L = shBaseLead(id, txt.trim().split('\n')[0].slice(0, 60), { why: txt.trim().slice(0, 1500) + '\n\n(נוסף כטקסט משיתוף מהטלפון.)' });
+        shSave(L); shShowLead(L, '✓ הליד נוסף ל-📸 ידני'); return L;
+      }
+    }
+    let dataUrl = 'data:' + type + ';base64,' + b64, outType = type, w = 0, h = 0;
+    if (/^image\//.test(type)) {
+      const c = await shCompressImage(dataUrl);
+      if (c && c.data.length < dataUrl.length) { dataUrl = c.data; outType = 'image/jpeg'; w = c.w; h = c.h; }
+      else if (c) { w = c.w; h = c.h; }
+    }
+    if (dataUrl.length > SH_MAX_B64) { shBanner('הקובץ גדול מדי (מעל ~7MB). שלח קובץ קטן יותר או צילום מסך.', false); return null; }
+    const hash = await shSha(dataUrl);
+    for (const L of leads) if (L.attach && L.attach.hash === hash) { shShowLead(L, 'הקובץ הזה כבר קיים: ' + L.company); shAddFile.dup = (shAddFile.dup || 0) + 1; return L; }
+    const isShot = /^image\//.test(type) && (!name || /^(IMG_|image|Screenshot|צילום|Photo|תמונה)/i.test(name) || /^\d+$/.test(String(name).replace(/\.\w+$/, '')));
+    const base = String(name || '').replace(/\.[a-z0-9]{2,5}$/i, '').trim();
+    const company = isShot ? '📸 צילום מסך · ' + day : (base || (type === 'application/pdf' ? 'PDF · ' + day : 'קובץ · ' + day));
+    const id = fixedId || ('sh-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
+    if (leadById[id]) return leadById[id];
+    const ext = outType === 'image/jpeg' ? 'jpg' : outType === 'image/png' ? 'png' : outType === 'application/pdf' ? 'pdf' : (String(name || '').split('.').pop() || 'bin');
+    const attach = { name: (base || 'file') + '.' + ext, type: outType, size: Math.round(dataUrl.length * 0.75), hash: hash, w: w || undefined, h: h || undefined };
+    if (shNetOk) {
+      const r = await fetch(SH_FILES + '/' + encKey(id) + '.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: attach.name, type: outType, data: dataUrl, t: Date.now() }) });
+      if (!r.ok) { shBanner('העלאת הקובץ נכשלה (' + r.status + ')', false); return null; }
+    } else {
+      try { localStorage.setItem('voipho-crm-file-' + id, dataUrl); } catch (e) { shBanner('אין מקום לשמור את הקובץ במכשיר', false); return null; }
+    }
+    const L = shBaseLead(id, company, { attach: attach, titleAuto: isShot, manualSource: isShot ? 'צילום מסך מהטלפון' : 'קובץ מהטלפון' });
+    shSave(L);
+    shShowLead(L, isShot ? '✓ צילום המסך נוסף ל-📸 ידני' : '✓ הקובץ נוסף ל-📸 ידני');
+    return L;
+  }
+  let shDraining = false;
+  async function shDrainInbox(announce) {
+    if (!shNetOk || shDraining) return 0;
+    shDraining = true; let n = 0; shAddFile.dup = 0;
+    try {
+      const r = await fetch(SH_INBOX + '.json?shallow=true', { cache: 'no-store' });
+      const keys = r.ok ? Object.keys((await r.json()) || {}) : [];
+      if (!keys.length) { if (announce) shBanner('לא נמצא קובץ חדש. אם שלחת קובץ ענק (מעל ~7MB), נסה קטן יותר.', false); return 0; }
+      for (const k of keys.sort()) {
+        if (announce) shBanner('⏳ מעלה קובץ…');
+        const rr = await fetch(SH_INBOX + '/' + encodeURIComponent(k) + '.json', { cache: 'no-store' });
+        const it = rr.ok ? await rr.json() : null;
+        const id = 'sh-' + String(k).replace(/[^A-Za-z0-9_-]/g, '');
+        let L = null;
+        if (it && (it.data || it.url || it.text)) {
+          if (it.url && !it.data) L = addSharedLink(it.url, it.title || '');
+          else L = await shAddFile(it.data || btoa(unescape(encodeURIComponent(String(it.text || '')))), it.name || '', it.type || '', id);
+        }
+        if (L || !it) { await fetch(SH_INBOX + '/' + encodeURIComponent(k) + '.json', { method: 'DELETE' }); n++; }
+      }
+      const nn = n - (shAddFile.dup || 0);
+      if (announce && nn > 0) shBanner('✓ ' + (nn === 1 ? 'הקובץ עלה ונשמר ב-📸 ידני' : nn + ' קבצים עלו ונשמרו ב-📸 ידני'), true);
+      else if (announce && n) shBanner('הקובץ כבר קיים ב-CRM', true);
+    } catch (e) { if (announce) shBanner('אין חיבור. הקובץ מחכה ויעלה בפעם הבאה שתפתח את ה-CRM.', false); }
+    finally { shDraining = false; const b = document.getElementById('shBanner'); if (b && /⏳/.test(b.textContent)) b.hidden = true; }
+    return n;
+  }
+  async function shOpenFile(L) {
+    const a = L && L.attach; if (!a) return;
+    let data = null;
+    try { data = localStorage.getItem('voipho-crm-file-' + L.id); } catch (e) {}
+    if (!data && shNetOk) { shBanner('⏳ טוען קובץ…'); try { const r = await fetch(SH_FILES + '/' + encKey(L.id) + '.json', { cache: 'no-store' }); const j = r.ok ? await r.json() : null; data = j && j.data; } catch (e) {} const b = document.getElementById('shBanner'); if (b) b.hidden = true; }
+    if (!data) { infoToast('הקובץ לא נמצא'); return; }
+    const bin = atob(data.split(',')[1] || ''); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([u8], { type: a.type || 'application/octet-stream' }));
+    const ov = document.createElement('div'); ov.className = 'sh-ov'; ov.setAttribute('role', 'dialog');
+    const isImg = /^image\//.test(a.type);
+    ov.innerHTML = '<div class="sh-ov-box">' + (isImg ? '<img alt="" class="sh-ov-img">' : (a.type === 'application/pdf' ? '<iframe class="sh-ov-pdf" title="PDF"></iframe>' : '<p class="sh-ov-p"></p>')) +
+      '<div class="sh-ov-row"><a class="sh-btn" target="_blank" rel="noopener">פתח / הורד</a><button type="button" class="sh-btn" data-x>סגור</button></div></div>';
+    if (isImg) ov.querySelector('img').src = url; else if (a.type === 'application/pdf') ov.querySelector('iframe').src = url; else ov.querySelector('p').textContent = a.name;
+    const dl = ov.querySelector('a'); dl.href = url; dl.download = a.name || 'file';
+    ov.addEventListener('click', e => { if (e.target === ov || e.target.closest('[data-x]')) { ov.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000); } });
+    document.body.appendChild(ov);
+  }
+  function shRename(L) {
+    const v = prompt('שם החברה', L.company || ''); if (v == null || !v.trim()) return;
+    const o = loadObj(SHARED_KEY), cur = o[L.id]; if (!cur) return;
+    shSave(Object.assign({}, cur, { company: v.trim().slice(0, 80), titleAuto: false })); render({ noAnim: true });
+  }
+  function shDelete(L) {
+    if (!confirm('למחוק את "' + (L.company || '') + '" מה-CRM?')) return;
+    const old = loadObj(SHARED_KEY)[L.id];
+    shRemove(L.id); render({ noAnim: true });
+    let undone = false;
+    showToast('"' + (L.company || '') + '" נמחק · בטל', () => { undone = true; if (old) { shSave(old); render({ noAnim: true }); } }, 'בטל מחיקה');
+    setTimeout(() => {
+      if (undone || loadObj(SHARED_KEY)[L.id]) return;
+      if (L.attach && shNetOk) fetch(SH_FILES + '/' + encKey(L.id) + '.json', { method: 'DELETE' }).catch(() => {});
+      try { localStorage.removeItem('voipho-crm-file-' + L.id); } catch (e) {}
+    }, 8000);
+  }
+  function shDecorate() {
+    feedEl.querySelectorAll('.card[data-id^="sh-"]').forEach(card => {
+      const L = leadById[card.getAttribute('data-id')];
+      if (!L || !L.shared) return;
+      let s = card.querySelector(':scope > .sh-strip');
+      const sig = (L.attach ? 'f' : '') + (L.sharedUrl ? 'u' : '');
+      if (s && s.getAttribute('data-sig') === sig) return;
+      if (s) s.remove();
+      s = document.createElement('div'); s.className = 'sh-strip'; s.setAttribute('data-sig', sig);
+      s.innerHTML = (L.attach ? '<button type="button" class="sh-chip" data-sh="file">' + (/^image\//.test(L.attach.type) ? '🖼️ צילום' : '📎 קובץ') + '</button>' : '') +
+        (L.sharedUrl ? '<a class="sh-chip" data-sh="link" target="_blank" rel="noopener">🔗 הקישור</a>' : '') +
+        '<button type="button" class="sh-chip" data-sh="ren">✏️ שם</button><button type="button" class="sh-chip" data-sh="del">🗑️ מחק</button>';
+      const a = s.querySelector('[data-sh="link"]'); if (a) a.href = L.sharedUrl;
+      s.addEventListener('click', e => {
+        e.stopPropagation();
+        const b = e.target.closest('[data-sh]'); if (!b) return;
+        const cur = leadById[card.getAttribute('data-id')]; if (!cur) return;
+        const act = b.getAttribute('data-sh');
+        if (act === 'file') shOpenFile(cur); else if (act === 'ren') shRename(cur); else if (act === 'del') shDelete(cur);
+      });
+      ['pointerdown', 'mousedown', 'touchstart'].forEach(ev => s.addEventListener(ev, e => e.stopPropagation(), { passive: true }));
+      card.appendChild(s);
+    });
+  }
+  new MutationObserver(() => shDecorate()).observe(feedEl, { childList: true, subtree: true });
+  /* —— 📲 חיבור לאייפון —— */
+  function shFileToB64(file) { return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result)); fr.onerror = rej; fr.readAsDataURL(file); }); }
+  async function shUploadFiles(files) {
+    for (const f of Array.from(files || [])) {
+      if (f.size > 25 * 1024 * 1024) { shBanner('"' + f.name + '" גדול מדי', false); continue; }
+      shBanner('⏳ מעלה ' + f.name + '…');
+      const d = await shFileToB64(f).catch(() => null);
+      if (d) await shAddFile(d, f.name, f.type);
+    }
+    const b = document.getElementById('shBanner'); if (b && /⏳/.test(b.textContent)) b.hidden = true;
+  }
+  function shOpenIphone() {
+    const ov = document.createElement('div'); ov.className = 'sh-ov'; ov.id = 'shIphone'; ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-label', 'חיבור לאייפון');
+    ov.innerHTML = '<div class="sh-ov-box sh-guide" dir="rtl">' +
+      '<h2>📲 חיבור לאייפון · Voipho</h2>' +
+      '<ol>' +
+      '<li><b>קיצור השיתוף:</b> פתח את הכפתור הזה בספארי באייפון ולחץ <b>Add Shortcut</b>. בתפריט השיתוף של כל אפליקציה יופיע <b>Voipho CRM</b>, בנפרד מ-Klober CRM.<br><a class="sh-btn sh-main" href="Voipho-CRM.shortcut" download="Voipho CRM.shortcut">📲 הורד והתקן את הקיצור</a></li>' +
+      '<li><b>אייקון במסך הבית:</b> בספארי לחץ שתף ⬆️ ← <b>הוסף למסך הבית</b> ← שם: <b>Voipho</b>. זה נפתח כאפליקציה נפרדת מ-Klober.</li>' +
+      '<li><b>שימוש:</b> בכל אפליקציה לחץ שתף ← <b>Voipho CRM</b>. אפשר לשתף קישור (אתר, לינקדאין, פייסבוק), צילום מסך, תמונה או PDF. הליד נכנס ל-<b>📸 ידני</b> ומופיע בכל המכשירים.</li>' +
+      '</ol>' +
+      '<p class="sh-note">קבצים: תמונות וצילומי מסך נדחסים אוטומטית (JPEG עד 1600px). PDF ושאר קבצים עד כ-7MB, קובץ אחד בכל שיתוף.</p>' +
+      '<label class="sh-btn">📎 העלה קובץ / צילום מסך מכאן<input type="file" accept="image/*,application/pdf,.pdf,.doc,.docx,.xlsx,.csv,.txt" multiple hidden></label>' +
+      '<div class="sh-ov-row"><button type="button" class="sh-btn" data-x>סגור</button></div></div>';
+    ov.querySelector('input[type=file]').addEventListener('change', e => { const fs = e.target.files; ov.remove(); shUploadFiles(fs); });
+    ov.addEventListener('click', e => { if (e.target === ov || e.target.closest('[data-x]')) ov.remove(); });
+    document.body.appendChild(ov);
+  }
+  (function shInitUi() {
+    const st = document.createElement('style');
+    st.textContent = '.sh-strip{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px 12px}.sh-chip{border:0;background:var(--surface-2,#222);color:inherit;font:inherit;font-size:13px;padding:5px 10px;border-radius:999px;cursor:pointer;text-decoration:none}' +
+      '.sh-ov{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:16px}.sh-ov-box{background:var(--surface,#141414);color:var(--text,#fff);border-radius:16px;max-width:560px;width:100%;max-height:90vh;overflow:auto;padding:16px}' +
+      '.sh-ov-img{max-width:100%;max-height:70vh;display:block;margin:0 auto;border-radius:10px}.sh-ov-pdf{width:100%;height:70vh;border:0;background:#fff;border-radius:10px}.sh-ov-row{display:flex;gap:8px;justify-content:center;margin-top:12px}' +
+      '.sh-btn{display:inline-block;border:0;background:var(--surface-2,#2a2a2a);color:inherit;font:inherit;padding:9px 14px;border-radius:10px;cursor:pointer;text-decoration:none;margin-top:8px}.sh-main{background:#FF3C00;color:#fff;font-weight:700}' +
+      '.sh-guide h2{margin:0 0 10px;font-size:19px}.sh-guide ol{padding-inline-start:20px;line-height:1.6}.sh-guide li{margin-bottom:10px}.sh-note{opacity:.75;font-size:13px}' +
+      '.sh-banner{position:fixed;bottom:calc(84px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:10000;background:#1f1f1f;color:#fff;padding:10px 16px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.4);font-size:14px;max-width:90vw;text-align:center}.sh-banner.ok{background:#16794a}.sh-banner.err{background:#8a1f11}.sh-banner[hidden]{display:none}' +
+      '.icon-btn.sh-ibtn{font-size:17px;line-height:1}';
+    document.head.appendChild(st);
+    const anchor = document.getElementById('calBtn');
+    if (anchor) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'icon-btn sh-ibtn'; b.id = 'iphoneBtn';
+      b.setAttribute('aria-label', 'חיבור לאייפון'); b.title = '📲 חיבור לאייפון · העלאת קובץ'; b.textContent = '📲';
+      b.addEventListener('click', shOpenIphone);
+      anchor.parentNode.insertBefore(b, anchor);
+    }
+  })();
+  (function shBoot() {
+    const raw = location.href, qp = new URLSearchParams(location.search);
+    let shared = qp.get('add') || qp.get('url') || qp.get('text') || '';
+    if (!shared && /[?&]add=(.+)/i.test(raw)) { try { shared = decodeURIComponent(raw.split(/[?&]add=/i)[1]); } catch (e) { shared = raw.split(/[?&]add=/i)[1]; } }
+    const title = qp.get('title') || '';
+    const wantInbox = qp.has('inbox');
+    if (shared || wantInbox) {
+      const keep = syncNs ? '?syncns=' + encodeURIComponent(syncNs) : '';
+      try { history.replaceState(null, '', location.pathname + keep); } catch (e) {}
+    }
+    if (shared && /https?:\/\//i.test(shared)) setTimeout(() => addSharedLink(shared, title), 0);
+    else if (shared) setTimeout(() => shAddFile(btoa(unescape(encodeURIComponent(shared))), '', 'text'), 0);
+    if (wantInbox) setTimeout(() => shDrainInbox(true), 0);
+    else if (shNetOk) setTimeout(() => shDrainInbox(false), 2500);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') shDrainInbox(false); });
+    window.VoiphoCRM && Object.assign(window.VoiphoCRM, { shared: { addSharedLink, shAddFile, shDrainInbox, list: () => Object.keys(loadObj(SHARED_KEY)), SH_INBOX, SH_FILES } });
+  })();
 
   setFilter(filter);
   if (!syncEnabled) { migrateChatNotes(); migrateManualContacts(); }

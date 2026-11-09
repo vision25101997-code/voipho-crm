@@ -1,0 +1,40 @@
+{
+  "name": "Voipho CRM",
+  "short_name": "Voipho",
+  "description": "Voipho leads CRM",
+  "start_url": "./",
+  "scope": "./",
+  "id": "./?app=voipho",
+  "display": "standalone",
+  "background_color": "#0A0A0A",
+  "theme_color": "#FF3C00",
+  "dir": "rtl",
+  "lang": "he",
+  "icons": [
+    {
+      "src": "apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
+}
